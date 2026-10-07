@@ -26,7 +26,13 @@ window, with shift, w and z fixed, as a consistency check: the per-window
 concentrations should agree.
 
     fit_spectrum(x, T_meas, lines, T, P_pa, L_cm, ils, options) -> dict
+    fit_multigas(x, T_meas, [(name, lines), ...], T, P_pa, L_cm, ils, options) -> dict
+                         several gases at once, tau = sum_k x_k tau_k, one x per gas
     auto_windows(...)    windows around the strong line groups of a line list
+
+fit_spectrum scales every line of its list by one x, so a line list holding
+several molecules is treated as one gas at fixed ratios - use fit_multigas
+when another absorber (H2O, CO, CO2 ...) overlaps the target's lines.
 """
 
 import time
@@ -51,7 +57,7 @@ DEFAULTS = {
     "fit_broadening": True,
     "broadening0": 0.003,      # starting extra ILS HWHM, cm-1
     "max_broadening": 0.05,
-    "fit_zero": True,
+    "fit_zero": True,          # True, False, or "auto": fixed at 0 unless a line is saturated
     "fit_lorentz": False,      # scale factor on the HITRAN Lorentz widths
     "baseline_order": 1,       # 0 = constant scale, 1 = linear, ...
     "oversample": 8,           # fine-grid points per data point
@@ -62,6 +68,27 @@ DEFAULTS = {
     "ils_centre": "peak",
     "windows": None,           # list of (lo, hi) for the per-window check, "auto", or None
 }
+
+# fit_zero "auto": the zero level is fitted only when the model's peak optical
+# depth exceeds this.  With optically thin lines (1 - z) e^-tau + z ~ 1 - (1 - z) tau,
+# so z and a common scale on the mixing ratios cannot be told apart.
+AUTO_ZERO_TAU = 1.0
+
+
+def _auto_zero(fit, args, o):
+    """Run fit(*args, options) with the zero fixed, and again with it free when
+    the result has a saturated line.  None when fit_zero is not "auto"."""
+    if o.get("fit_zero") != "auto":
+        return None
+    r = fit(*args, dict(o, fit_zero=False, windows=None))
+    tau = r["tau_max"]
+    tau = max(tau.values()) if isinstance(tau, dict) else tau
+    if tau > AUTO_ZERO_TAU:
+        r = fit(*args, dict(o, fit_zero=True))
+    elif o.get("windows"):                              # the per-window check was skipped above
+        r = fit(*args, dict(o, fit_zero=False))
+    r["zero_mode"] = "auto: %s (peak tau %.3g)" % ("fitted" if tau > AUTO_ZERO_TAU else "fixed at 0", tau)
+    return r
 
 
 def _masses(lines, idx, fallback):
@@ -219,6 +246,10 @@ def fit_spectrum(x, T_meas, lines, T, P_pa, L_cm, ils, options=None):
     curves and, if options["windows"], one ppm per window."""
     t0 = time.perf_counter()
     o = dict(DEFAULTS); o.update(options or {})
+    r = _auto_zero(fit_spectrum, (x, T_meas, lines, T, P_pa, L_cm, ils), o)
+    if r is not None:
+        r["elapsed_s"] = time.perf_counter() - t0
+        return r
     x = np.asarray(x, float); Tm = np.asarray(T_meas, float)
     order = np.argsort(x); x, Tm = x[order], Tm[order]
     fm = ForwardModel(x, lines, T, P_pa, L_cm, ils, o)
@@ -305,6 +336,162 @@ def fit_spectrum(x, T_meas, lines, T, P_pa, L_cm, ils, options=None):
                         "rms": float(np.sqrt(np.mean(rw.fun ** 2))),
                         "tau_max": float(-np.log(max(Tt_w[mm].min(), 1e-300))) if mm.any() else float("nan")})
         out["windows"] = win
+    out["elapsed_s"] = time.perf_counter() - t0
+    return out
+
+
+# =============================================================================
+# Several gases at once
+# =============================================================================
+class MultiForwardModel:
+    """One ForwardModel per gas on a common fine grid; the optical depths add:
+
+        tau(v) = sum_k x_k * tau_k(v - shift)
+
+    vmr_self: {name: ppm} assumed for each gas's self-broadening (it matters
+    for H2O at the per-cent level, whose self-broadening is ~5x its air one)."""
+
+    def __init__(self, x, gases, T, P_pa, L_cm, ils, opts, vmr_self):
+        self.names = [n for n, _ in gases]
+        self.fms = [ForwardModel(x, lines, T, P_pa, L_cm, ils, dict(opts, vmr0=vmr_self.get(n) or 0.0))
+                    for n, lines in gases]
+        f0 = self.fms[0]
+        self.x, self.xf, self.df, self.ker_ils, self.n_total = f0.x, f0.xf, f0.df, f0.ker_ils, f0.n_total
+        self.kernel = f0.kernel
+
+    def tau(self, vmrs, shift, g=1.0, only=None):
+        t = np.zeros_like(self.xf)
+        for k, (fm, v) in enumerate(zip(self.fms, vmrs)):
+            if only is None or k == only:
+                t += v * fm.tau_unit(g)
+        return np.interp(self.xf - shift, self.xf, t, left=0.0, right=0.0)
+
+    def transmittance(self, vmrs, shift, w, z, xq=None, ker=None, g=1.0, only=None):
+        Tc = fftconvolve(np.exp(-self.tau(vmrs, shift, g, only)), self.kernel(w) if ker is None else ker,
+                         mode="same")
+        return np.interp(self.x if xq is None else xq, self.xf, Tc) * (1 - z) + z
+
+
+def _multi_initial_guess(mf, x, Tm, o, vmr0):
+    """Shift and mixing ratios to start from: for each trial shift, the
+    optically thin absorbance -ln(T/top) is fitted as a non-negative sum of the
+    ILS-convolved optical depths per ppm (NNLS); the shift with the smallest
+    residual wins.  Saturated lines read low here, the full fit corrects them."""
+    from scipy.optimize import nnls
+    top = float(np.percentile(Tm, 95))
+    a = -np.log(np.clip(Tm / top, 1e-4, None))
+    taus = [fftconvolve(fm.tau_unit(1.0), mf.ker_ils, mode="same") for fm in mf.fms]
+    shifts = [o["shift0"]] if o["shift0"] is not None else (
+        np.arange(-o["max_shift"], o["max_shift"] + mf.df / 2, mf.df) if o["fit_shift"] else [0.0])
+    best = (np.inf, 0.0, None)
+    for sh in shifts:
+        A = np.column_stack([np.interp(x, mf.xf + sh, t) for t in taus])
+        v, rn = nnls(A, a)
+        if rn < best[0]:
+            best = (rn, float(sh), v)
+    _, shift, v = best
+    v = [float(vmr0[n]) if vmr0.get(n) is not None else max(float(vk), 1e-3)
+         for n, vk in zip(mf.names, v)]
+    return v, shift
+
+
+def fit_multigas(x, T_meas, gases, T, P_pa, L_cm, ils, options=None):
+    """Fit the mixing ratios of several gases to one transmittance spectrum.
+
+    gases      list of (name, lines) - one HITRAN line list per gas
+    options    as fit_spectrum, except
+                 "vmr0"       {name: starting ppm}, missing names from an NNLS guess
+                 "self_iter"  refits after updating each gas's self-broadening to its
+                              fitted mixing ratio (default 1; 0 = keep the start values)
+    Shift, broadening, zero, Lorentz scale and baseline are common to all gases.
+
+    Returns ppm / ppm_err ({name: value}), the correlation matrix of the
+    mixing ratios ("corr", names in "gases"), each gas's own convolved
+    transmittance times the baseline ("components"), and the same fit
+    diagnostics as fit_spectrum."""
+    t0 = time.perf_counter()
+    o = dict(DEFAULTS); o.update(options or {})
+    r = _auto_zero(fit_multigas, (x, T_meas, gases, T, P_pa, L_cm, ils), o)
+    if r is not None:
+        r["elapsed_s"] = time.perf_counter() - t0
+        return r
+    vmr0 = dict(o["vmr0"] or {}) if isinstance(o["vmr0"], dict) else {}
+    x = np.asarray(x, float); Tm = np.asarray(T_meas, float)
+    order = np.argsort(x); x, Tm = x[order], Tm[order]
+    names = [n for n, _ in gases]
+    if len(set(names)) != len(names):
+        raise ValueError("gas names must be unique")
+    K = len(gases)
+    lo, hi = x[0], x[-1]
+    xn = _xn(x, lo, hi)
+    nb = int(o["baseline_order"]) + 1
+
+    mf = MultiForwardModel(x, gases, T, P_pa, L_cm, ils, o, vmr0)
+    v0, shift0 = _multi_initial_guess(mf, x, Tm, o, vmr0)
+
+    NB0 = K + 4
+    pnames = list(names) + ["shift", "broadening", "zero", "lorentz_scale"] + ["b%d" % k for k in range(nb)]
+    free = [True] * K + [bool(o["fit_shift"]), bool(o["fit_broadening"]), bool(o["fit_zero"]),
+                         bool(o["fit_lorentz"])] + [True] * nb
+    lb_all = np.array([0.0] * K + [-o["max_shift"], 0.0, -0.3, 0.2] + [0.0] + [-2.0] * (nb - 1))
+    ub_all = np.array([1e7] * K + [o["max_shift"], o["max_broadening"], 0.3, 5.0] + [2.0] + [2.0] * (nb - 1))
+    fi = np.flatnonzero(free)
+
+    def model(p, only=None):
+        base = np.polyval(p[NB0:][::-1], xn)
+        return base * mf.transmittance(p[:K], p[K], p[K + 1], p[K + 2], g=p[K + 3], only=only)
+
+    p_all = np.clip(np.array(list(v0) + [shift0, o["broadening0"] if o["fit_broadening"] else 0.0, 0.0, 1.0]
+                             + [float(np.percentile(Tm, 95))] + [0.0] * (nb - 1)), lb_all, ub_all)
+    n_iter = 1 + max(0, int(o.get("self_iter", 1)))
+    nfev = 0
+    for it in range(n_iter):
+        if it:                                          # self-broadening at the fitted mixing ratios
+            mf = MultiForwardModel(x, gases, T, P_pa, L_cm, ils, o, dict(zip(names, p_all[:K])))
+
+        def unpack(v, base=p_all):
+            p = base.copy(); p[fi] = v
+            return p
+
+        r = least_squares(lambda v: model(unpack(v)) - Tm, p_all[fi], bounds=(lb_all[fi], ub_all[fi]),
+                          x_scale="jac", method="trf", max_nfev=200 * len(fi),
+                          diff_step=1e-4 if o["fit_lorentz"] else None)
+        p_all = unpack(r.x)
+        nfev += int(r.nfev)
+    p = p_all
+    cov_f, err_f = _cov_err(r, len(fi))
+    err = np.zeros(len(p)); err[fi] = err_f
+    cov = np.zeros((len(p), len(p))); cov[np.ix_(fi, fi)] = cov_f
+    sd = np.sqrt(np.clip(np.diag(cov)[:K], 1e-300, None))
+    corr = cov[:K, :K] / np.outer(sd, sd)
+
+    fit = model(p)
+    res = Tm - fit
+    ss_tot = float(np.sum((Tm - Tm.mean()) ** 2))
+    base = np.polyval(p[NB0:][::-1], xn)
+    out = {
+        "gases": names,
+        "ppm": dict(zip(names, p[:K].tolist())), "ppm_err": dict(zip(names, err[:K].tolist())),
+        "corr": corr,
+        "shift": float(p[K]), "shift_err": float(err[K]),
+        "broadening": float(p[K + 1]), "broadening_err": float(err[K + 1]),
+        "zero": float(p[K + 2]), "zero_err": float(err[K + 2]),
+        "lorentz_scale": float(p[K + 3]), "lorentz_scale_err": float(err[K + 3]),
+        "baseline": p[NB0:].tolist(), "params": dict(zip(pnames, p.tolist())),
+        "free": [n for n, f in zip(pnames, free) if f],
+        "rms": float(np.sqrt(np.mean(res ** 2))),
+        "r2": 1.0 - float(res @ res) / ss_tot if ss_tot > 0 else float("nan"),
+        "x": x, "data": Tm, "fit": fit, "residual": res, "baseline_curve": base,
+        "components": {n: model(p, only=k) for k, n in enumerate(names)},
+        "n_lines": {n: int(len(fm.idx)) for n, fm in zip(names, mf.fms)}, "n_total": mf.n_total,
+        "status": int(r.status), "message": r.message, "nfev": nfev,
+    }
+    out["at_bound"] = [n for n, v, a, b, f in zip(pnames, p, lb_all, ub_all, free)
+                       if f and n not in names and not n.startswith("b")
+                       and (abs(v - a) < 1e-6 * max(1, abs(a)) or abs(v - b) < 1e-6 * max(1, abs(b)))
+                       and not (n == "broadening" and v == 0.0)]
+    m = (mf.xf >= lo) & (mf.xf <= hi)
+    out["tau_max"] = {n: float(mf.tau(p[:K], p[K], p[K + 3], only=k)[m].max()) for k, n in enumerate(names)}
     out["elapsed_s"] = time.perf_counter() - t0
     return out
 

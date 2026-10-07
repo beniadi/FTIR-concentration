@@ -3,6 +3,7 @@
 
     molecules()                         {name: [(global_id, local_iso, iso_name, abundance), ...]}
     fetch(molecule, numin, numax, isos) download into Input/HITRAN, return the .data path
+    molecule_name(mol)                  HITRAN molecule number -> name
     partition_ratio(mol, iso, T)        Q(296 K) / Q(T) from TIPS (exact, per isotopologue)
     iso_mass(mol, iso)                  molecular mass (amu), for the Doppler width
 
@@ -51,6 +52,15 @@ def molecules():
         out.setdefault(rec[ix["mol_name"]], []).append(
             (gid, rec[ix["I"]], rec[ix["iso_name"]], rec[ix["abundance"]]))
     return out
+
+
+def molecule_name(mol):
+    """HITRAN molecule number -> name ('H2O' for 1), None if unknown."""
+    h = hapi(); ix = h.ISO_ID_INDEX
+    for rec in h.ISO_ID.values():
+        if rec[ix["M"]] == int(mol):
+            return rec[ix["mol_name"]]
+    return None
 
 
 def table_name(molecule, numin, numax):

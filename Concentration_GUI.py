@@ -5,7 +5,9 @@ The look (stylesheet, buttons, group boxes, tables, menus that own their
 settings) follows Voigt_GUI.py through gui_common.py, so the two windows stay
 one family.  The work is new: a HITRAN line-by-line forward model, convolved
 with the instrument line shape, is fitted to the measured transmittance and
-the mixing ratio comes out of the fit (retrieval.fit_spectrum).
+the mixing ratio comes out of the fit (retrieval.fit_spectrum).  With other
+gases added (HITRAN -> Add Other Gas), every gas gets its own mixing ratio in
+one fit (retrieval.fit_multigas).
 
     python Concentration_GUI.py
     python Concentration_GUI.py spectrum.txt     # open a spectrum at start-up
@@ -30,6 +32,9 @@ WHAT IT DOES
    to the data in the analysis region and reports x (ppm) with its
    uncertainty, the fitted shift, broadening, zero offset and baseline, and
    one ppm per line window as a consistency check.
+5. Gases that overlap the target's lines (H2O, CO, CO2 ...) can be added with
+   their own line lists; they are then fitted together with the target, and
+   the plot can show each gas's own transmittance.
 
 Requires numpy, scipy, matplotlib, PyQt5, and hitran-api for TIPS partition
 sums and downloads (the fit falls back to a power law without it).
@@ -82,14 +87,14 @@ DEFAULTS = {
     # the fit (retrieval.DEFAULTS)
     "fit_shift": True, "max_shift": 0.1,
     "fit_broadening": True, "broadening0": 0.003, "max_broadening": 0.05,
-    "fit_zero": True, "fit_lorentz": False,
+    "zero_mode": "auto", "fit_lorentz": False,
     "baseline_order": 1, "oversample": 8,
     "q_mode": "tips", "iso": "", "s_min_rel": 1e-5, "mass_amu": 44.0,
     "ils_centre": "peak", "windows": "auto",
     # synthetic ILS
     "gauss_fwhm": 0.026, "sinc_mopd_cm": 9.47, "ils_half_width": 0.25,
     # HITRAN download
-    "dl_molecule": "N2O", "dl_main_iso": False,
+    "dl_molecule": "N2O", "dl_other_molecule": "H2O", "dl_main_iso": False,
     # start-up
     "example_on_start": True,
 }
@@ -102,11 +107,23 @@ EXAMPLE = {
     "ils": ("Input", "ILS_LINEFIT.txt"),
     "region": (2215.5, 2220.0),
 }
+# The multi-gas example (multigas_example.py): 500 ppm N2O, 2 % H2O and 30 ppm
+# CO, with the H2O line between two N2O lines.  "others" are the other gases.
+EXAMPLE_MULTI = {
+    "spectrum": ("Input", "Mix_N2O_H2O_CO_simulated.txt"),
+    "lines": ("Input", "HITRAN", "N2O_2156.00-2168.00.data"),
+    "others": (("Input", "HITRAN", "H2O_2156.00-2168.00.data"), ("Input", "HITRAN", "CO_2156.00-2168.00.data")),
+    "ils": ("Input", "ILS_LINEFIT.txt"),
+    "region": (2160.0, 2163.5),
+}
 
 
-def example_paths():
-    out = {k: os.path.join(HERE, *v) for k, v in EXAMPLE.items() if k != "region"}
-    return out if all(os.path.isfile(p) for p in out.values()) else None
+def example_paths(ex=EXAMPLE):
+    out = {k: os.path.join(HERE, *v) for k, v in ex.items() if k not in ("region", "others")}
+    if "others" in ex:
+        out["others"] = [os.path.join(HERE, *v) for v in ex["others"]]
+    files = [p for v in out.values() for p in (v if isinstance(v, list) else [v])]
+    return out if all(os.path.isfile(p) for p in files) else None
 
 
 def load_settings():
@@ -121,7 +138,8 @@ def fit_options(s):
     return {"fit_shift": bool(s["fit_shift"]), "max_shift": float(s["max_shift"]),
             "fit_broadening": bool(s["fit_broadening"]), "broadening0": float(s["broadening0"]),
             "max_broadening": float(s["max_broadening"]),
-            "fit_zero": bool(s["fit_zero"]), "fit_lorentz": bool(s["fit_lorentz"]),
+            "fit_zero": {"fit": True, "fixed": False}.get(s["zero_mode"], "auto"),
+            "fit_lorentz": bool(s["fit_lorentz"]),
             "baseline_order": int(s["baseline_order"]), "oversample": int(s["oversample"]),
             "q_mode": s["q_mode"], "iso": str(s["iso"]) or None,
             "s_min_rel": float(s["s_min_rel"]), "mass_amu": float(s["mass_amu"]),
@@ -147,6 +165,57 @@ def read_sim_header(path):
     except OSError:
         pass
     return None
+
+
+_GAS_RE = re.compile(r"^\s*#?\s*gas\s+(\S+)\s+([-+\d.eE]+)\s*ppm")
+
+
+def read_sim_gases(path):
+    """{gas: ppm} from the "gas <line list> <ppm> ppm" lines of a simulated
+    mixture's header (the gas named after its line-list file), else {}."""
+    out = {}
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for _ in range(30):
+                m = _GAS_RE.match(fh.readline())
+                if m:
+                    name = os.path.basename(m.group(1).replace("\\", "/")).split("_")[0]
+                    out[name] = float(m.group(2))
+    except OSError:
+        pass
+    return out
+
+
+def gas_name(lines, path):
+    """The molecule's HITRAN name if the list holds one molecule, else the
+    file name up to its first '_' ('H2O_2156.00-2168.00.data' -> 'H2O')."""
+    mols = set(int(m) for m in lines["mol"])
+    if len(mols) == 1 and 0 not in mols:
+        try:
+            n = hitran_fetch.molecule_name(mols.pop())
+            if n:
+                return n
+        except Exception:
+            pass
+    return os.path.basename(path).split("_")[0].split(".")[0] or "gas"
+
+
+def retrieve(x, y, target, lines, others, T_K, P_pa, L_cm, ils, opts):
+    """fit_spectrum, or fit_multigas when there are other gases.  A multi-gas
+    result is given the single-gas keys for the target (ppm, ppm_err, tau_max
+    as the largest of any gas, n_lines as the total), with the per-gas values
+    under gas_ppm, gas_err, gas_tau and gas_lines."""
+    if not others:
+        r = rt.fit_spectrum(x, y, lines, T_K, P_pa, L_cm, ils, opts)
+        r.update(multi=False, target=target)
+        return r
+    gases = [(target, lines)] + [(g["name"], g["lines"]) for g in others]
+    r = rt.fit_multigas(x, y, gases, T_K, P_pa, L_cm, ils, dict(opts, windows=None))
+    r.update(multi=True, target=target, gas_ppm=r["ppm"], gas_err=r["ppm_err"], gas_tau=r["tau_max"],
+             gas_lines=r["n_lines"])
+    r["ppm"], r["ppm_err"] = r["gas_ppm"][target], r["gas_err"][target]
+    r["tau_max"], r["n_lines"] = max(r["gas_tau"].values()), sum(r["gas_lines"].values())
+    return r
 
 
 class Job:
@@ -179,9 +248,14 @@ def build_main_figure(fig, x, T, region, r, show, base_font=9.0, keep_xlim=None)
         ax.plot(x, T, color=C_DATA, lw=0.9, label="Measured")
     if r is not None:
         if show.get("fit", True):
-            ax.plot(r["x"], r["fit"], color=C_FIT, lw=1.1, label="Model  %s ppm" % fmt(r["ppm"], digits=5))
+            ax.plot(r["x"], r["fit"], color=C_FIT, lw=1.1, label="Model  %s%s ppm" % (
+                r["target"] + " " if r.get("multi") else "", fmt(r["ppm"], digits=5)))
         if show.get("baseline"):
             ax.plot(r["x"], r["baseline_curve"], color=INK_SECONDARY, lw=0.9, ls="--", label="Baseline")
+        if show.get("gases") and r.get("components"):
+            for k, (g, c) in enumerate(r["components"].items()):
+                ax.plot(r["x"], c, color=SERIES_COLOURS[(k + 2) % len(SERIES_COLOURS)], lw=0.9,
+                        label="%s  %s ppm" % (g, fmt(r["gas_ppm"][g], digits=5)))
         if show.get("windows"):
             for w in r.get("windows") or []:
                 for e in (w["lo"], w["hi"]):
@@ -250,9 +324,13 @@ class SettingsDialog(QDialog):
         row.addWidget(QLabel("max")); row.addWidget(self._dspin("max_broadening", 0.0001, 1, 0.005, 5))
         row.addStretch(1)
         f.addRow("Extra ILS Gaussian HWHM (cm⁻¹)", row)
-        f.addRow("Zero-level offset", self._check("fit_zero", "Fit",
-                 "Transmittance offset z (detector non-linearity, stray light).\n"
-                 "It matters most when lines are black at their centre."))
+        f.addRow("Zero-level offset", self._combo("zero_mode", (
+            ("auto", "Auto - fit only with a saturated line (peak τ > 1)"),
+            ("fit", "Fit"), ("fixed", "Fixed at 0")),
+            "Transmittance offset z (detector non-linearity, stray light).\n"
+            "It matters most when lines are black at their centre. With only\n"
+            "optically thin lines it cannot be told apart from a common scale on\n"
+            "the concentrations, and fitting it then biases every gas."))
         f.addRow("Lorentz width scale", self._check("fit_lorentz", "Fit",
                  "Scale factor on the HITRAN pressure-broadened widths\n"
                  "(a pressure reading or broadening coefficients that are off)."))
@@ -280,7 +358,8 @@ class SettingsDialog(QDialog):
         f.addRow("Per-window refit", self._combo("windows", (
             ("auto", "One window per strong line group"), ("none", "Off")),
             "Each line (group) refitted on its own with the shift, broadening and\n"
-            "zero fixed: the window concentrations should agree."))
+            "zero fixed: the window concentrations should agree.\n"
+            "Single-gas fits only."))
         f.addRow(self._check("example_on_start", "Load and retrieve the worked example at start-up"))
         v.addWidget(g)
         v.addStretch(1)
@@ -386,13 +465,17 @@ class ConcentrationWindow(QMainWindow):
         self._spec = None              # spectrum_io.Spectrum
         self._lines = None             # concentration.load_hitran dict
         self._lines_path = ""
-        self._ils = None               # (offset_cm1, values)
+        self._target = ""              # the target gas's name
+        self._others = []              # other gases fitted with the target: {"name", "lines", "path"}
+        self._ils = None              # (offset_cm1, values)
         self._ils_src = ""
         self._reference = None         # (ppm, T, P, L) from a simulated file's header
+        self._ref_gases = {}           # {gas: ppm} from a simulated mixture's header
         self._result = None
         self._worker = None
         self._busy = False
         self._build_menu_bar(); self._build_central()
+        self._show_others()
         self._redraw()
         self.statusBar().showMessage("Ready. Open a spectrum, a HITRAN line list and an ILS, then Retrieve.")
 
@@ -407,7 +490,8 @@ class ConcentrationWindow(QMainWindow):
         a = QAction("Save Result…", self); a.setShortcut("Ctrl+S")
         a.triggered.connect(self.save_result); fm.addAction(a)
         a = QAction("Export Curves…", self)
-        a.setToolTip("Data, model, baseline and residual in the region as text columns.")
+        a.setToolTip("Data, model, baseline and residual in the region as text columns\n"
+                     "(and each gas's own model in a multi-gas fit).")
         a.triggered.connect(self.export_curves); fm.addAction(a)
         a = QAction("Save Plot…", self); a.triggered.connect(self.save_plot); fm.addAction(a)
         fm.addSeparator()
@@ -418,6 +502,13 @@ class ConcentrationWindow(QMainWindow):
         a.setToolTip("160-character HITRAN .par/.data, or a CSV with nu, sw, elower columns.")
         a.triggered.connect(self.open_lines); hm.addAction(a)
         a = QAction("Download Lines…", self); a.triggered.connect(self.download_lines); hm.addAction(a)
+        hm.addSeparator()
+        a = QAction("Add Other Gas from File…", self)
+        a.setToolTip("A gas whose lines overlap the target's: it is fitted with its own concentration.")
+        a.triggered.connect(self.add_other_gas); hm.addAction(a)
+        a = QAction("Download Other Gas…", self)
+        a.triggered.connect(lambda: self.download_lines(other=True)); hm.addAction(a)
+        a = QAction("Clear Other Gases", self); a.triggered.connect(self.clear_other_gases); hm.addAction(a)
 
         im = mb.addMenu("ILS")
         a = QAction("Load ILS File…", self); a.setShortcut("Ctrl+I")
@@ -439,6 +530,9 @@ class ConcentrationWindow(QMainWindow):
         a = QAction("Load Example", self)
         a.setToolTip("N2O_simulated_500ppm.txt with the N2O line list and ILS_LINEFIT.txt - true answer 500 ppm.")
         a.triggered.connect(self.load_example); hp.addAction(a)
+        a = QAction("Load Multi-gas Example", self)
+        a.setToolTip("Mix_N2O_H2O_CO_simulated.txt: 500 ppm N2O, 20000 ppm H2O, 30 ppm CO fitted together.")
+        a.triggered.connect(self.load_multi_example); hp.addAction(a)
         hp.addSeparator()
         a = QAction("About", self); a.triggered.connect(self.show_about); hp.addAction(a)
         a = QAction("Method && Caveats", self); a.triggered.connect(self.show_method); hp.addAction(a)
@@ -465,7 +559,8 @@ class ConcentrationWindow(QMainWindow):
         row = QHBoxLayout(); row.setSpacing(10)
         self.chk_show = {}
         for key, text, on in (("data", "Data", True), ("fit", "Model", True), ("baseline", "Baseline", False),
-                              ("windows", "Windows", False), ("residual", "Residual", True)):
+                              ("windows", "Windows", False), ("gases", "Each gas", True),
+                              ("residual", "Residual", True)):
             cb = QCheckBox(text); cb.setChecked(on); cb.toggled.connect(lambda _c: self._redraw(True))
             row.addWidget(cb); self.chk_show[key] = cb
         row.addStretch(1)
@@ -501,12 +596,12 @@ class ConcentrationWindow(QMainWindow):
         g = QGridLayout(box); g.setContentsMargins(12, 10, 12, 10)
         g.setHorizontalSpacing(8); g.setVerticalSpacing(6)
 
-        def file_row(r, caption, slot, extra=None):
+        def file_row(r, caption, slot, extra=None, open_text="Open…"):
             cap = QLabel(caption); cap.setProperty("cap", True); g.addWidget(cap, r, 0)
             lbl = QLabel("none"); lbl.setProperty("muted", True); lbl.setWordWrap(True)
             lbl.setTextInteractionFlags(Qt.TextSelectableByMouse)
             g.addWidget(lbl, r, 1)
-            b = QPushButton("Open…"); b.setObjectName("secondary"); b.clicked.connect(slot)
+            b = QPushButton(open_text); b.setObjectName("secondary"); b.clicked.connect(slot)
             g.addWidget(b, r, 2)
             if extra:
                 b2 = QPushButton(extra[0]); b2.setObjectName("secondary"); b2.clicked.connect(extra[1])
@@ -514,15 +609,21 @@ class ConcentrationWindow(QMainWindow):
             return lbl
 
         self.lbl_spec = file_row(0, "Spectrum", self.open_spectrum)
-        self.lbl_lines = file_row(1, "Line list", self.open_lines, ("Download…", self.download_lines))
-        self.lbl_ils = file_row(2, "ILS", self.load_ils)
-        cap = QLabel("Data is"); cap.setProperty("muted", True); g.addWidget(cap, 3, 0)
+        self.lbl_lines = file_row(1, "Target gas", self.open_lines, ("Download…", self.download_lines))
+        self.lbl_others = file_row(2, "Other gases", self.add_other_gas,
+                                   ("Download…", lambda: self.download_lines(other=True)), "Add…")
+        self.lbl_others.setToolTip("Gases fitted together with the target, each with its own concentration.\n"
+                                   "None: single-gas fit.")
+        b = QPushButton("Clear"); b.setObjectName("secondary"); b.clicked.connect(self.clear_other_gases)
+        g.addWidget(b, 2, 4)
+        self.lbl_ils = file_row(3, "ILS", self.load_ils)
+        cap = QLabel("Data is"); cap.setProperty("muted", True); g.addWidget(cap, 4, 0)
         self.combo_kind = QComboBox()
         self.combo_kind.addItem("Transmittance", "T")
         self.combo_kind.addItem("Absorbance  log₁₀(1/T)", "A10")
         self.combo_kind.addItem("Absorbance  ln(1/T)", "Ae")
         self.combo_kind.currentIndexChanged.connect(self._on_kind_changed)
-        g.addWidget(self.combo_kind, 3, 1, 1, 3)
+        g.addWidget(self.combo_kind, 4, 1, 1, 4)
         g.setColumnStretch(1, 1)
         parent_layout.addWidget(box)
 
@@ -594,6 +695,9 @@ class ConcentrationWindow(QMainWindow):
             ("Column", "x · N_total · L, molecule/cm²."),
             ("Reference", "The true concentration written in a simulated file's header, and the\n"
                           "deviation of the retrieval from it."),
+            ("Other gases", "Multi-gas fit: each other gas's concentration, its deviation from a\n"
+                            "simulated reference, and its correlation r with the target.\n"
+                            "|r| near 1 means the two cannot be separated in this region."),
             ("Window spread", "Mean ± standard deviation of the per-window concentrations\n"
                               "(Windows tab) - they should agree with the global fit."),
             ("Shift", "Wavenumber offset, spectrum − HITRAN (cm⁻¹)."),
@@ -761,6 +865,10 @@ class ConcentrationWindow(QMainWindow):
             self.spin_P.setValue(P / conc.PRESSURE_UNITS[self.combo_P.currentData()])
             self.log("%s: simulated at %g ppm, T %g K, P %g Pa, L %g cm - cell conditions taken from it"
                      % (sp.name, ppm, T, P, L))
+        self._ref_gases = read_sim_gases(path)
+        if self._ref_gases:
+            self.log("%s: simulated mixture %s" % (sp.name, ", ".join(
+                "%s %g ppm" % kv for kv in self._ref_gases.items())))
         r = self.region()
         if r is None or r[1] < sp.x[0] or r[0] > sp.x[-1]:
             self._set_region(sp.x[0], sp.x[-1])
@@ -792,35 +900,84 @@ class ConcentrationWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Line list", "%s: %s" % (type(e).__name__, e)); return False
         self._lines, self._lines_path = lines, path
+        self._target = gas_name(lines, path)
         mols = sorted(set(int(m) for m in lines["mol"]))
-        self.lbl_lines.setText("%s  ·  %d lines, %.3f–%.3f cm⁻¹" % (
-            os.path.basename(path), len(lines["nu"]), lines["nu"].min(), lines["nu"].max()))
+        self.lbl_lines.setText("%s  ·  %s  ·  %d lines, %.3f–%.3f cm⁻¹" % (
+            self._target, os.path.basename(path), len(lines["nu"]), lines["nu"].min(), lines["nu"].max()))
         self.lbl_lines.setToolTip(path)
-        self.log("line list %s: %d lines, molecule id(s) %s" % (path, len(lines["nu"]), mols))
+        self.log("line list %s: %s, %d lines, molecule id(s) %s" % (path, self._target, len(lines["nu"]), mols))
+        self._others = [g for g in self._others if g["name"] != self._target]
+        self._show_others()
         self._update_status()
         return True
 
-    def download_lines(self):
+    # -- other gases (multi-gas fit) -----------------------------------------
+    def add_other_gas(self):
+        start = hitran_fetch.HITRAN_DIR if os.path.isdir(hitran_fetch.HITRAN_DIR) else HERE
+        paths, _ = QFileDialog.getOpenFileNames(self, "Add other gas (HITRAN line list)", start,
+                                                "HITRAN (*.data *.par *.csv *.txt);;All files (*)")
+        for p in paths:
+            self.load_other_gas_file(p)
+
+    def load_other_gas_file(self, path):
+        try:
+            lines = conc.load_hitran(path)
+        except Exception as e:
+            QMessageBox.critical(self, "Other gas", "%s: %s" % (type(e).__name__, e)); return False
+        name = gas_name(lines, path)
+        if self._lines is not None and name == self._target:
+            QMessageBox.information(self, "Other gas", "%s is already the target gas." % name); return False
+        old = [g for g in self._others if g["name"] == name]
+        self._others = [g for g in self._others if g["name"] != name] + [
+            {"name": name, "lines": lines, "path": path}]
+        self.log("%s gas %s: %s, %d lines" % ("replaced" if old else "added", name, path, len(lines["nu"])))
+        self._show_others()
+        return True
+
+    def clear_other_gases(self):
+        if self._others:
+            self._others = []
+            self.log("other gases cleared - single-gas fit")
+            self._show_others()
+
+    def _show_others(self):
+        if self._others:
+            self.lbl_others.setText("  ·  ".join("%s (%d lines)" % (g["name"], len(g["lines"]["nu"]))
+                                                for g in self._others))
+            self.lbl_others.setToolTip("\n".join(g["path"] for g in self._others))
+        else:
+            self.lbl_others.setText("none  ·  single-gas fit")
+            self.lbl_others.setToolTip("Gases fitted together with the target, each with its own concentration.")
+
+    def download_lines(self, other=False):
         try:
             mols = list(hitran_fetch.molecules())
         except ImportError as e:
             QMessageBox.warning(self, "HITRAN", str(e)); return
         r = self.region()
         lo, hi = (math.floor(r[0]) - 1.0, math.ceil(r[1]) + 1.0) if r else (2214.0, 2221.0)
-        dlg = DownloadDialog(mols, self._settings["dl_molecule"], lo, hi, bool(self._settings["dl_main_iso"]), self)
+        key = "dl_other_molecule" if other else "dl_molecule"
+        dlg = DownloadDialog(mols, self._settings[key], lo, hi, bool(self._settings["dl_main_iso"]), self)
+        if other:
+            dlg.setWindowTitle("Download Other Gas")
         if dlg.exec_() != QDialog.Accepted:
             return
         mol, lo, hi, main = dlg.values()
-        self._settings["dl_molecule"], self._settings["dl_main_iso"] = mol, main
+        self._settings[key], self._settings["dl_main_iso"] = mol, main
         self._save_settings()
         self.log("downloading %s %.3f–%.3f cm⁻¹ from HITRANonline…" % (mol, lo, hi))
         self._start("download %s" % mol,
                     lambda: {"path": hitran_fetch.fetch(mol, lo, hi, isos=[1] if main else None)},
-                    self._on_downloaded, "Downloading %s lines from HITRANonline…" % mol)
+                    self._on_downloaded_other if other else self._on_downloaded,
+                    "Downloading %s lines from HITRANonline…" % mol)
 
     def _on_downloaded(self, _job, r):
         self.log("saved %s (%.1f s)" % (r["path"], r["elapsed_s"]))
         self.load_lines_file(r["path"])
+
+    def _on_downloaded_other(self, _job, r):
+        self.log("saved %s (%.1f s)" % (r["path"], r["elapsed_s"]))
+        self.load_other_gas_file(r["path"])
 
     # -- ILS -----------------------------------------------------------------
     def load_ils(self):
@@ -894,12 +1051,16 @@ class ConcentrationWindow(QMainWindow):
         x, y = self._spec.x[m].copy(), T[m].copy()
         T_K, P_pa, L_cm = self.spin_T.value(), self.pressure_pa(), self.spin_L.value()
         lines, ils, opts = self._lines, self._ils, fit_options(self._settings)
+        target, others = self._target, list(self._others)
         self._save_settings()
-        self.log("retrieve %s, %.4f–%.4f cm⁻¹ (%d points), T %g K, P %g Pa, L %g cm"
-                 % (self._spec.name, reg[0], reg[1], len(x), T_K, P_pa, L_cm))
-        self._run_args = {"T_K": T_K, "P_Pa": P_pa, "L_cm": L_cm, "region": reg}
-        self._start("retrieval", lambda: rt.fit_spectrum(x, y, lines, T_K, P_pa, L_cm, ils, opts),
-                    self._on_retrieved, "Fitting the forward model…")
+        self.log("retrieve %s, %.4f–%.4f cm⁻¹ (%d points), T %g K, P %g Pa, L %g cm, %s"
+                 % (self._spec.name, reg[0], reg[1], len(x), T_K, P_pa, L_cm,
+                    "gases %s" % " + ".join([target] + [g["name"] for g in others]) if others else target))
+        self._run_args = {"T_K": T_K, "P_Pa": P_pa, "L_cm": L_cm, "region": reg,
+                          "others_paths": {g["name"]: g["path"] for g in others}}
+        self._start("retrieval", lambda: retrieve(x, y, target, lines, others, T_K, P_pa, L_cm, ils, opts),
+                    self._on_retrieved, "Fitting %s…" % (
+                        "%d gases together" % (1 + len(others)) if others else "the forward model"))
 
     def _on_retrieved(self, _job, r):
         r.update(self._run_args)
@@ -907,10 +1068,23 @@ class ConcentrationWindow(QMainWindow):
         self._result = r
         self._show_result(r)
         self._redraw(True)
-        self.log("→ %s ppm   shift %+.5f   rms %.3g   (%s, %d evaluations, %.2f s)"
-                 % (fmt(r["ppm"], r["ppm_err"]), r["shift"], r["rms"], r["message"], r["nfev"], r["elapsed_s"]))
+        if r["multi"]:
+            self.log("→ %s   shift %+.5f   rms %.3g   (%s, %d evaluations, %.2f s)"
+                     % ("   ".join("%s %s ppm" % (g, fmt(r["gas_ppm"][g], r["gas_err"][g])) for g in r["gases"]),
+                        r["shift"], r["rms"], r["message"], r["nfev"], r["elapsed_s"]))
+        else:
+            self.log("→ %s ppm   shift %+.5f   rms %.3g   (%s, %d evaluations, %.2f s)"
+                     % (fmt(r["ppm"], r["ppm_err"]), r["shift"], r["rms"], r["message"], r["nfev"], r["elapsed_s"]))
         self.lbl_status.setText("Done in %.2f s: %s ppm." % (r["elapsed_s"], fmt(r["ppm"], r["ppm_err"])))
         self.statusBar().showMessage("Retrieved %s ppm" % fmt(r["ppm"], r["ppm_err"]))
+
+    def _ref_ppm(self, gas):
+        """The simulated (true) ppm of a gas from the spectrum's header, else None."""
+        if self._ref_gases:
+            return self._ref_gases.get(gas)
+        if self._reference and gas == self._target:
+            return self._reference[0]
+        return None
 
     def _show_result(self, r):
         L = self.lbl_res
@@ -920,15 +1094,27 @@ class ConcentrationWindow(QMainWindow):
             self.tbl_win.setRowCount(0)
             self._draw_windows(None)
             return
-        self.lbl_ppm.setText("%s ppm" % fmt(r["ppm"], r["ppm_err"], digits=6))
+        self.lbl_ppm.setText("%s%s ppm" % (r["target"] + "  " if r.get("target") else "",
+                                           fmt(r["ppm"], r["ppm_err"], digits=6)))
         x = r["ppm"] * 1e-6
         L["Number density"].setText("%.5g molecule/cm³" % (x * r["n_total"]))
         L["Column"].setText("%.5g molecule/cm²" % (x * r["n_total"] * r["L_cm"]))
-        if self._reference:
-            ref = self._reference[0]
-            L["Reference"].setText("%g ppm  →  %+.3f %%" % (ref, 100 * (r["ppm"] - ref) / ref))
+        ref = self._ref_ppm(r.get("target"))
+        L["Reference"].setText("%g ppm  →  %+.3f %%" % (ref, 100 * (r["ppm"] - ref) / ref) if ref else "—")
+        if r.get("multi"):
+            t = r["target"]
+            rows = []
+            for k, g in enumerate(r["gases"]):
+                if g == t:
+                    continue
+                v, e = r["gas_ppm"][g], r["gas_err"][g]
+                ref = self._ref_ppm(g)
+                rows.append("%s  %s ppm%s  ·  r = %+.2f" % (
+                    g, fmt(v, e, digits=6), "  (ref %g, %+.3f %%)" % (ref, 100 * (v - ref) / ref) if ref else "",
+                    r["corr"][0, k]))
+            L["Other gases"].setText("\n".join(rows))
         else:
-            L["Reference"].setText("—")
+            L["Other gases"].setText("none (single-gas fit)")
         wins = r.get("windows") or []
         if wins:
             w = np.array([q["ppm"] for q in wins])
@@ -936,19 +1122,26 @@ class ConcentrationWindow(QMainWindow):
                 w.mean(), w.std(ddof=1) if len(w) > 1 else 0.0, len(w),
                 100 * (w.std(ddof=1) if len(w) > 1 else 0.0) / w.mean() if w.mean() else float("nan")))
         else:
-            L["Window spread"].setText("—")
+            L["Window spread"].setText("not run in a multi-gas fit" if r.get("multi") else "—")
         free = set(r["free"])
         L["Shift"].setText(fmt(r["shift"], r["shift_err"]) + ("" if "shift" in free else "  (fixed)"))
         L["Extra broadening"].setText(fmt(r["broadening"], r["broadening_err"])
                                       + ("" if "broadening" in free else "  (fixed)"))
-        L["Zero offset"].setText(fmt(r["zero"], r["zero_err"]) + ("" if "zero" in free else "  (fixed)"))
+        L["Zero offset"].setText(fmt(r["zero"], r["zero_err"]) + ("" if "zero" in free else "  (fixed)")
+                                 + ("  · %s" % r["zero_mode"] if r.get("zero_mode") else ""))
         L["Lorentz scale"].setText(fmt(r["lorentz_scale"], r["lorentz_scale_err"])
                                    + ("" if "lorentz_scale" in free else "  (fixed)"))
         L["Baseline"].setText("  ".join("%.6g" % b for b in r["baseline"]))
         L["RMS / R²"].setText("%.4g  /  %.6f" % (r["rms"], r["r2"]))
-        L["Peak τ"].setText("%.3g" % r["tau_max"])
-        L["Lines / solver"].setText("%d lines · status %d, %d evaluations, %.2f s"
-                                    % (r["n_lines"], r["status"], r["nfev"], r["elapsed_s"]))
+        if r.get("multi"):
+            L["Peak τ"].setText("  ".join("%s %.3g" % kv for kv in r["gas_tau"].items()))
+            L["Lines / solver"].setText("%s lines · status %d, %d evaluations, %.2f s" % (
+                " + ".join("%d %s" % (n, g) for g, n in r["gas_lines"].items()),
+                r["status"], r["nfev"], r["elapsed_s"]))
+        else:
+            L["Peak τ"].setText("%.3g" % r["tau_max"])
+            L["Lines / solver"].setText("%d lines · status %d, %d evaluations, %.2f s"
+                                        % (r["n_lines"], r["status"], r["nfev"], r["elapsed_s"]))
         warn = []
         if r["at_bound"]:
             warn.append("on a bound: %s" % ", ".join(r["at_bound"]))
@@ -956,6 +1149,15 @@ class ConcentrationWindow(QMainWindow):
             warn.append("solver did not converge: %s" % r["message"])
         if r["tau_max"] > 5 and "zero" not in free:
             warn.append("saturated lines with the zero level fixed")
+        if r["tau_max"] < rt.AUTO_ZERO_TAU and "zero" in free:
+            warn.append("zero level fitted with only optically thin lines - it trades against the "
+                        "concentration scale; set it to Auto or Fixed")
+        if r.get("multi"):
+            k = len(r["gases"])
+            bad = ["%s/%s" % (r["gases"][i], r["gases"][j]) for i in range(k) for j in range(i + 1, k)
+                   if abs(r["corr"][i, j]) > 0.9]
+            if bad:
+                warn.append("strongly correlated (|r| > 0.9): %s" % ", ".join(bad))
         L["Warnings"].setText("; ".join(warn) if warn else "none")
         self.tbl_win.setRowCount(len(wins))
         for i, w in enumerate(wins):
@@ -1013,8 +1215,26 @@ class ConcentrationWindow(QMainWindow):
         if not self.load_spectrum_file(p["spectrum"]):
             return
         self.load_lines_file(p["lines"])
+        self.clear_other_gases()
         x, y = sio.load_ils(p["ils"]); self.set_ils(x, y, os.path.basename(p["ils"]))
         self._set_region(lo, hi)
+        self._redraw()
+        self.run_retrieval()
+
+    def load_multi_example(self):
+        p = example_paths(EXAMPLE_MULTI)
+        if p is None:
+            QMessageBox.information(self, "Multi-gas example",
+                                    "The example files are not in Input/ - run  python multigas_example.py  "
+                                    "once to download the lines and simulate the spectrum."); return
+        if not self.load_spectrum_file(p["spectrum"]):
+            return
+        self.load_lines_file(p["lines"])
+        self.clear_other_gases()
+        for q in p["others"]:
+            self.load_other_gas_file(q)
+        x, y = sio.load_ils(p["ils"]); self.set_ils(x, y, os.path.basename(p["ils"]))
+        self._set_region(*EXAMPLE_MULTI["region"])
         self._redraw()
         self.run_retrieval()
 
@@ -1045,8 +1265,22 @@ class ConcentrationWindow(QMainWindow):
                 ("rms", "%.6g" % r["rms"]), ("r2", "%.8f" % r["r2"]), ("tau_max", "%.4g" % r["tau_max"]),
                 ("n_lines", "%d" % r["n_lines"]), ("free", " ".join(r["free"])),
                 ("at_bound", " ".join(r["at_bound"]) or "none"), ("solver", r["message"])]
-        if self._reference:
-            rows.append(("reference_ppm", "%g" % self._reference[0]))
+        if r.get("multi"):
+            rows.insert(3, ("target_gas", r["target"]))
+            rows.append(("fit", "multi-gas: %s" % " + ".join(r["gases"])))
+            for k, g in enumerate(r["gases"]):
+                rows.append(("ppm_%s" % g, "%.8g ± %.4g" % (r["gas_ppm"][g], r["gas_err"][g])))
+                rows.append(("tau_max_%s" % g, "%.4g" % r["gas_tau"][g]))
+                if g != r["target"]:
+                    rows.append(("line_list_%s" % g, r["others_paths"].get(g, "")))
+                    rows.append(("corr_%s_%s" % (r["target"], g), "%+.4f" % r["corr"][0, k]))
+        if r.get("zero_mode"):
+            rows.append(("zero_mode", r["zero_mode"]))
+        ref = self._ref_ppm(r.get("target"))
+        if ref:
+            rows.append(("reference_ppm", "%g" % ref))
+        for g, v in self._ref_gases.items():
+            rows.append(("reference_ppm_%s" % g, "%g" % v))
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 for k, v in rows:
@@ -1074,9 +1308,14 @@ class ConcentrationWindow(QMainWindow):
             return
         self._remember_dir("last_save_dir", path)
         try:
-            sio.save_columns(path, [r["x"], r["data"], r["fit"], r["baseline_curve"], r["residual"]],
-                             header="%s  %s ppm\nwavenumber_cm-1\tdata_T\tmodel_T\tbaseline\tresidual"
-                                    % (os.path.basename(r["spectrum"]), fmt(r["ppm"], r["ppm_err"])))
+            comps = r.get("components") or {}
+            what = ("  ".join("%s %s ppm" % (g, fmt(r["gas_ppm"][g], r["gas_err"][g])) for g in r["gases"])
+                    if r.get("multi") else "%s ppm" % fmt(r["ppm"], r["ppm_err"]))
+            sio.save_columns(path, [r["x"], r["data"], r["fit"], r["baseline_curve"], r["residual"]]
+                             + list(comps.values()),
+                             header="%s  %s\nwavenumber_cm-1\tdata_T\tmodel_T\tbaseline\tresidual%s"
+                                    % (os.path.basename(r["spectrum"]), what,
+                                       "".join("\tmodel_T_%s_only" % g for g in comps)))
         except Exception as e:
             QMessageBox.critical(self, "Export failed", "%s: %s" % (type(e).__name__, e)); return
         self.log("exported %s" % path)
@@ -1120,6 +1359,11 @@ class ConcentrationWindow(QMainWindow):
             "intensities, air/self broadening and pressure shifts, Voigt profiles, "
             "N<sub>total</sub> = P / k<sub>B</sub>T.<br>"
             "T<sub>model</sub> = baseline · [(1 − z)·(e<sup>−τ</sup> ⊛ ILS ⊛ G<sub>w</sub>) + z]<br><br>"
+            "<b>Several gases</b><br>"
+            "With other gases added, τ = Σ<sub>k</sub> x<sub>k</sub>·τ<sub>k</sub>: one mixing ratio per "
+            "gas, with the shift, broadening, zero, Lorentz scale and baseline shared. Leaving out a gas "
+            "whose lines overlap the target's biases the target. The correlation r between gases tells "
+            "whether the region separates them.<br><br>"
             "<b>Why fit instead of integrate</b><br>"
             "Lines that are black at their centre lose their core to the ILS; integrating the "
             "measured absorbance then reads low and no deconvolution recovers it. The non-linear "
@@ -1127,7 +1371,8 @@ class ConcentrationWindow(QMainWindow):
             "<b>Inputs that matter</b><br>"
             "x scales as 1/(N<sub>total</sub>·L): the pressure, temperature and path length enter "
             "the answer directly. The ILS and the zero level matter most for saturated lines "
-            "(peak τ ≫ 1).<br><br>"
+            "(peak τ ≫ 1). With only thin lines (peak τ < 1) the zero level cannot be told apart from "
+            "the concentration scale; the default Auto setting then keeps it at 0.<br><br>"
             "<b>Uncertainty</b><br>"
             "± is one standard error from the fit residuals only - not the uncertainty of T, P, L, "
             "the HITRAN intensities or the ILS. The spread of the per-window values is a better "
@@ -1160,6 +1405,25 @@ def self_test():
     print("example: true %g ppm   retrieved %s ppm (%+.3f %%)   rms %.3g   %d windows   %.2f s"
           % (ppm_true, fmt(r["ppm"], r["ppm_err"]), 100 * (r["ppm"] - ppm_true) / ppm_true, r["rms"],
              len(r.get("windows") or []), r["elapsed_s"]))
+    q = example_paths(EXAMPLE_MULTI)
+    if q is None:
+        print("multi-gas example files missing (python multigas_example.py)"); return r
+    sp = sio.load_spectrum(q["spectrum"])
+    true = read_sim_gases(q["spectrum"])
+    _ppm, T, P, L = read_sim_header(q["spectrum"])
+    lo, hi = EXAMPLE_MULTI["region"]
+    m = (sp.x >= lo) & (sp.x <= hi)
+    lines = conc.load_hitran(q["lines"])
+    others = []
+    for path in q["others"]:
+        ln = conc.load_hitran(path)
+        others.append({"name": gas_name(ln, path), "lines": ln, "path": path})
+    rm = retrieve(sp.x[m], sp.y[m], gas_name(lines, q["lines"]), lines, others, T, P, L,
+                  sio.load_ils(q["ils"]), fit_options(DEFAULTS))
+    print("multi-gas example: %s   rms %.3g   zero %s   %.2f s" % (
+        "   ".join("%s %s ppm (%+.3f %%)" % (g, fmt(rm["gas_ppm"][g], rm["gas_err"][g]),
+                                            100 * (rm["gas_ppm"][g] - true[g]) / true[g]) for g in rm["gases"]),
+        rm["rms"], rm.get("zero_mode"), rm["elapsed_s"]))
     return r
 
 
