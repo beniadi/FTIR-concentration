@@ -119,7 +119,7 @@ reference on the right.*
 
 | Part | Function |
 |---|---|
-| Toolbar | Standard matplotlib tools: home (reset view), back/forward, pan, zoom, subplot spacing, axis editor, save. The cursor position (x = wavenumber, y = transmittance) is shown on the right. |
+| Zoom and pan | No toolbar: **scroll** over the plot zooms the wavenumber axis around the cursor, a left **drag** pans it, a **double click** resets the view. The y axis follows what is visible. The plots are drawn in a publication style (compact labels, units in brackets, full frame, grid). |
 | Upper plot | **Measured** spectrum (blue), fitted **Model** (orange, with its ppm in the legend), and the analysis **Region** (light-blue background). In a good fit the orange line covers the blue line completely, as in the screenshot. |
 | Lower plot (**Residual**) | Measured − model. It should look like random noise around zero. Shapes in it (wiggles at the line positions, a slope) point to a wrong ILS, shift, pressure or baseline. |
 | Check boxes | Show or hide **Data**, **Model**, **Baseline** (the fitted baseline as a dashed line), **Segments** (dotted lines at the edges of the consistency-check segments), **Each gas** (in a multi-gas fit, each gas's own modelled transmittance, with its ppm in the legend) and the **Residual** panel. |
@@ -129,7 +129,7 @@ reference on the right.*
 | Part | Function |
 |---|---|
 | **Region (cm⁻¹)** … **to** … | The wavenumber range used in the fit. Only points inside it are fitted. |
-| **Use view** | Sets the region to what the plot currently shows. Zoom in with the toolbar, then press it. |
+| **Use view** | Sets the region to what the plot currently shows. Zoom in with the mouse wheel, then press it. |
 | **Full** | Sets the region to the whole spectrum. |
 | **Retrieve Concentration** | Runs the fit (in the background, so the window stays responsive). |
 | Status line | What is still missing before a fit can run, or how long the last fit took and its result. |
@@ -196,10 +196,9 @@ which stays open and follows each new fit.
 
 ![The single-gas example](GUI.png)
 
-*The single-gas example (500 ppm N₂O, 2215.5–2220 cm⁻¹). This screenshot is
-from an earlier layout: the details are now behind the Details… button, the
-Line list row is now Gases · Select…, and the Windows tab is now Retrieval →
-Consistency Check.*
+*The single-gas example (Help → Load Example: 500 ppm N₂O, 2215.5–2220 cm⁻¹),
+retrieved as 499.997 ± 0.22 ppm. The fitted parameters below are behind the
+Details… button.*
 
 Values from this example (true values in brackets):
 
@@ -269,7 +268,8 @@ the N2O + H2O + CO simulation from `multigas_example.py` and fits it.
 
 * *File → Save Result*: text file with all inputs, fitted parameters and the consistency-check table.
 * *File → Export Curves*: columns of wavenumber, data, model, baseline, residual (plus each gas's own model in a multi-gas fit).
-* *File → Save Plot*: PNG, SVG or PDF at 300 dpi.
+* *File → Save Plot*: the current view in the publication style, as PNG
+  (600 dpi), SVG or PDF (text kept as text).
 
 Output goes to `Results/` by default. Settings are kept in
 `Config/concentration_settings.json`. Both folders are created on first use.

@@ -53,9 +53,6 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 
-import matplotlib
-from matplotlib.figure import Figure
-
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
@@ -65,10 +62,12 @@ import ils as ils_mod                                       # noqa: E402
 import concentration as conc                                # noqa: E402
 import retrieval as rt                                      # noqa: E402
 import hitran_fetch                                         # noqa: E402
-from gui_common import (STYLESHEET, PlotCanvas, JobWorker, style_axes, legend, style_table,   # noqa: E402
+from gui_common import (STYLESHEET, PlotCanvas, JobWorker, style_table,                      # noqa: E402
                         table_cell, fmt, config_dir, results_dir, load_json, save_json,
-                        INK_SECONDARY, INK_MUTED, GRID_INK, SURFACE,
-                        C_DATA, C_FIT, C_RESID, C_REGION, SERIES_COLOURS)
+                        INK_SECONDARY, INK_MUTED,
+                        C_DATA, C_FIT, C_RESID, C_REGION, SERIES_COLOURS,
+                        PUB_FONT, PUB_LW, PUB_FIT_LW, PUB_MARKER,
+                        pub_axes, pub_legend, pub_figure, pub_savefig)
 
 APP_TITLE = "FTIR Concentration 1.0"
 WIN_W, WIN_H = 1440, 940
@@ -254,8 +253,12 @@ class Job:
 # =============================================================================
 # Plot
 # =============================================================================
-def build_main_figure(fig, x, T, region, r, show, base_font=9.0, keep_xlim=None):
-    """Measured and modelled transmittance, with the residual underneath."""
+WN_LABEL = "Wavenumber [cm$^{-1}$]"
+
+
+def build_main_figure(fig, x, T, region, r, show, keep_xlim=None):
+    """Measured and modelled transmittance, with the residual underneath.
+    Drawn in the gui_common publication style."""
     fig.clear()
     with_res = bool(show.get("residual")) and r is not None
     if with_res:
@@ -263,41 +266,38 @@ def build_main_figure(fig, x, T, region, r, show, base_font=9.0, keep_xlim=None)
         ax = fig.add_subplot(gs[0]); axr = fig.add_subplot(gs[1], sharex=ax)
     else:
         ax = fig.add_subplot(111); axr = None
-    style_axes(ax, base_font)
     if x is None:
         ax.text(0.5, 0.5, "File → Open Spectrum", transform=ax.transAxes, ha="center", va="center",
-                color=INK_MUTED, fontsize=base_font + 2)
+                color=INK_MUTED, fontsize=PUB_FONT + 1)
         ax.set_xticks([]); ax.set_yticks([])
         return
     if region:
         ax.axvspan(region[0], region[1], color=C_REGION, alpha=0.6, lw=0, label="Region")
     if show.get("data", True):
-        ax.plot(x, T, color=C_DATA, lw=0.9, label="Measured")
+        ax.plot(x, T, color=C_DATA, lw=PUB_LW, label="Measured")
     if r is not None:
         if show.get("fit", True):
-            ax.plot(r["x"], r["fit"], color=C_FIT, lw=1.1, label="Model  %s%s ppm" % (
+            ax.plot(r["x"], r["fit"], color=C_FIT, lw=PUB_FIT_LW, label="Model  %s%s ppm" % (
                 r["target"] + " " if r.get("multi") else "", fmt(r["ppm"], digits=5)))
         if show.get("baseline"):
-            ax.plot(r["x"], r["baseline_curve"], color=INK_SECONDARY, lw=0.9, ls="--", label="Baseline")
+            ax.plot(r["x"], r["baseline_curve"], color=INK_SECONDARY, lw=PUB_FIT_LW, ls="--", label="Baseline")
         if show.get("gases") and r.get("components"):
             for k, (g, c) in enumerate(r["components"].items()):
-                ax.plot(r["x"], c, color=SERIES_COLOURS[(k + 2) % len(SERIES_COLOURS)], lw=0.9,
+                ax.plot(r["x"], c, color=SERIES_COLOURS[(k + 2) % len(SERIES_COLOURS)], lw=PUB_FIT_LW,
                         label="%s  %s ppm" % (g, fmt(r["gas_ppm"][g], digits=5)))
         if show.get("windows"):
             for w in r.get("windows") or []:
                 for e in (w["lo"], w["hi"]):
                     ax.axvline(e, color=INK_MUTED, lw=0.6, ls=":")
-    ax.set_ylabel("Transmittance", fontsize=base_font)
-    legend(ax, base_font, loc="lower left")
+    pub_axes(ax, None if axr is not None else WN_LABEL, "Transmittance [-]")
+    ax.ticklabel_format(useOffset=False, axis="x")
+    pub_legend(ax, loc="lower left")
     if axr is not None:
-        style_axes(axr, base_font)
-        axr.axhline(0.0, color=GRID_INK, lw=1.0)
-        axr.plot(r["x"], r["residual"], color=C_RESID, lw=0.8)
-        axr.set_ylabel("Residual", fontsize=base_font)
-        axr.set_xlabel("Wavenumber (cm⁻¹)", fontsize=base_font)
+        axr.axhline(0.0, color="k", lw=0.6)
+        axr.plot(r["x"], r["residual"], color=C_RESID, lw=PUB_FIT_LW)
+        pub_axes(axr, WN_LABEL, "Residual [-]")
+        axr.ticklabel_format(useOffset=False, axis="x")
         ax.tick_params(labelbottom=False)
-    else:
-        ax.set_xlabel("Wavenumber (cm⁻¹)", fontsize=base_font)
     if keep_xlim:
         ax.set_xlim(*keep_xlim)
     elif region:
@@ -724,7 +724,11 @@ class ConcentrationWindow(QMainWindow):
     def _build_plot_box(self, parent_layout):
         box = QGroupBox("Spectrum")
         v = QVBoxLayout(box); v.setContentsMargins(12, 12, 12, 10); v.setSpacing(6)
-        self.plot = PlotCanvas(5.0)
+        # no toolbar: scroll zooms the wavenumber axis, a drag pans it, a double click resets
+        self.plot = PlotCanvas(5.0, zoom_pan=True,
+                               on_change=lambda _ax: [_autoscale_y(a) for a in self.plot.fig.axes],
+                               on_reset=self._redraw)
+        self.plot.setToolTip("Scroll to zoom, drag to pan, double-click to reset the view")
         v.addWidget(self.plot, 1)
         row = QHBoxLayout(); row.setSpacing(10)
         self.chk_show = {}
@@ -938,7 +942,7 @@ class ConcentrationWindow(QMainWindow):
         style_table(self.tbl_win)
         self.tbl_win.setMinimumHeight(150)
         v.addWidget(self.tbl_win, 1)
-        self.win_plot = PlotCanvas(2.6, toolbar=False); self.win_plot.setMinimumHeight(220)
+        self.win_plot = PlotCanvas(2.6); self.win_plot.setMinimumHeight(220)
         v.addWidget(self.win_plot, 1)
         bb = QDialogButtonBox(QDialogButtonBox.Close)
         bb.rejected.connect(d.close); v.addWidget(bb)
@@ -950,7 +954,7 @@ class ConcentrationWindow(QMainWindow):
     def _build_ils_tab(self, tabs):
         tab = QWidget(); tabs.addTab(tab, "ILS")
         v = QVBoxLayout(tab); v.setContentsMargins(8, 10, 8, 8); v.setSpacing(8)
-        self.ils_plot = PlotCanvas(2.4, toolbar=True); self.ils_plot.setMinimumHeight(220)
+        self.ils_plot = PlotCanvas(2.4); self.ils_plot.setMinimumHeight(220)
         v.addWidget(self.ils_plot, 1)
         self.lbl_ils_stats = QLabel("—"); self.lbl_ils_stats.setProperty("muted", True)
         self.lbl_ils_stats.setWordWrap(True)
@@ -1283,11 +1287,11 @@ class ConcentrationWindow(QMainWindow):
 
     def _draw_ils(self):
         fig = self.ils_plot.fig; fig.clear()
-        ax = fig.add_subplot(111); style_axes(ax)
+        ax = fig.add_subplot(111)
         if self._ils is not None:
-            ax.plot(self._ils[0], self._ils[1], color=C_DATA, lw=1.1)
-            ax.axvline(0.0, color=GRID_INK, lw=1.0)
-        ax.set_xlabel("Offset from line centre (cm⁻¹)"); ax.set_ylabel("ILS")
+            ax.plot(self._ils[0], self._ils[1], color=C_DATA, lw=PUB_LW)
+            ax.axvline(0.0, color="k", lw=0.6)
+        pub_axes(ax, "Offset from line centre [cm$^{-1}$]", "ILS [-]")
         self.ils_plot.draw()
 
     # -- retrieval -----------------------------------------------------------
@@ -1459,11 +1463,11 @@ class ConcentrationWindow(QMainWindow):
 
     def _draw_windows(self, r):
         fig = self.win_plot.fig; fig.clear()
-        ax = fig.add_subplot(111); style_axes(ax)
+        ax = fig.add_subplot(111)
         wins = (r or {}).get("windows") or []
         if wins and r.get("multi"):
             # gases at ppm and at per cent: each segment as its deviation from its gas's global fit
-            ax.axhline(0.0, color=C_FIT, lw=1.0, label="Global fit")
+            ax.axhline(0.0, color=C_FIT, lw=PUB_FIT_LW, label="Global fit")
             for k, g in enumerate(r["gases"]):
                 ws = [w for w in wins if w["gas"] == g]
                 if not ws:
@@ -1471,38 +1475,33 @@ class ConcentrationWindow(QMainWindow):
                 ref = r["gas_ppm"][g]
                 ax.errorbar([0.5 * (w["lo"] + w["hi"]) for w in ws],
                             [100 * (w["ppm"] - ref) / ref for w in ws],
-                            yerr=[100 * w["ppm_err"] / ref for w in ws], fmt="o", ms=4,
-                            color=SERIES_COLOURS[(k + 2) % len(SERIES_COLOURS)], capsize=2, lw=0.9, label=g)
-            ax.set_xlabel("Segment centre (cm⁻¹)"); ax.set_ylabel("Deviation from global fit (%)")
+                            yerr=[100 * w["ppm_err"] / ref for w in ws], fmt="o", ms=PUB_MARKER,
+                            color=SERIES_COLOURS[(k + 2) % len(SERIES_COLOURS)], capsize=2, lw=PUB_FIT_LW,
+                            label=g)
+            pub_axes(ax, "Segment centre [cm$^{-1}$]", "Deviation from global fit [%]")
             lo, hi = ax.get_ylim()
             ax.set_ylim(lo, hi + 0.4 * (hi - lo))
-            leg = ax.legend(loc="upper center", ncol=len(r["gases"]) + 1, fontsize=8.5, frameon=True,
-                            framealpha=1.0, edgecolor=GRID_INK, facecolor=SURFACE)
-            for t in leg.get_texts():
-                t.set_color(INK_SECONDARY)
+            pub_legend(ax, loc="upper center", ncol=len(r["gases"]) + 1)
         elif wins:
             c = [0.5 * (w["lo"] + w["hi"]) for w in wins]
-            ax.axhline(r["ppm"], color=C_FIT, lw=1.0, label="Global fit")
+            ax.axhline(r["ppm"], color=C_FIT, lw=PUB_FIT_LW, label="Global fit")
             ax.axhspan(r["ppm"] - r["ppm_err"], r["ppm"] + r["ppm_err"], color=C_FIT, alpha=0.12, lw=0)
             sat = np.array([w["tau_max"] > 3 for w in wins])
             for mask, col, lab in ((~sat, SERIES_COLOURS[0], "Segment, peak τ ≤ 3"),
                                    (sat, SERIES_COLOURS[2], "Segment, peak τ > 3")):
                 if mask.any():
                     ax.errorbar(np.array(c)[mask], np.array([w["ppm"] for w in wins])[mask],
-                                yerr=np.array([w["ppm_err"] for w in wins])[mask], fmt="o", ms=4,
-                                color=col, capsize=2, lw=0.9, label=lab)
+                                yerr=np.array([w["ppm_err"] for w in wins])[mask], fmt="o", ms=PUB_MARKER,
+                                color=col, capsize=2, lw=PUB_FIT_LW, label=lab)
             if self._reference:
-                ax.axhline(self._reference[0], color=INK_SECONDARY, lw=0.9, ls="--", label="Reference")
-            ax.set_xlabel("Segment centre (cm⁻¹)"); ax.set_ylabel("ppm")
+                ax.axhline(self._reference[0], color=INK_SECONDARY, lw=PUB_FIT_LW, ls="--", label="Reference")
+            pub_axes(ax, "Segment centre [cm$^{-1}$]", "Concentration [ppm]")
             lo, hi = ax.get_ylim()                  # headroom so the legend sits above the points
             ax.set_ylim(lo, hi + 0.6 * (hi - lo))
-            leg = ax.legend(loc="upper center", ncol=2, fontsize=8.5, frameon=True, framealpha=1.0,
-                            edgecolor=GRID_INK, facecolor=SURFACE)
-            for t in leg.get_texts():
-                t.set_color(INK_SECONDARY)
+            pub_legend(ax, loc="upper center", ncol=2)
         else:
             ax.text(0.5, 0.5, "No segments" if r else "—", transform=ax.transAxes,
-                    ha="center", va="center", color=INK_MUTED)
+                    ha="center", va="center", color=INK_MUTED, fontsize=PUB_FONT + 1)
             ax.set_xticks([]); ax.set_yticks([])
         self.win_plot.draw()
 
@@ -1643,12 +1642,12 @@ class ConcentrationWindow(QMainWindow):
             return
         self._remember_dir("last_save_dir", path)
         try:
-            fig = Figure(figsize=(8.0, 6.0), dpi=300, facecolor=SURFACE, layout="constrained")
+            # the current view, drawn again at a fixed size in the same publication style
+            fig = pub_figure(1000, 650)
             show = {k: cb.isChecked() for k, cb in self.chk_show.items()}
             build_main_figure(fig, self._spec.x, self.transmittance(), self.region(), self._result, show,
                               keep_xlim=self.plot.fig.axes[0].get_xlim())
-            with matplotlib.rc_context({"svg.fonttype": "none", "pdf.fonttype": 42}):
-                fig.savefig(path, dpi=300, bbox_inches="tight", facecolor=SURFACE)
+            pub_savefig(fig, path, dpi=600 if path.lower().endswith(".png") else 300)
         except Exception as e:
             QMessageBox.critical(self, "Save failed", "%s: %s" % (type(e).__name__, e)); return
         self.log("saved %s" % path)
