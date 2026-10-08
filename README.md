@@ -18,7 +18,7 @@ This software was developed inspired by:
 
 **If you use this code for a publication, you must cite this paper.**
 
----
+----
 
 ## Why fit instead of integrating the absorbance?
 
