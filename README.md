@@ -95,7 +95,7 @@ multi-gas example: N2O 500.559 ± 1.6 ppm (+0.112 %)   H2O 20009.8 ± 1.4e+02 pp
 
 ## Using the GUI
 
-![FTIR Concentration window after fitting the multi-gas example](GUI-Multi_gass.png)
+![FTIR Concentration window after fitting the multi-gas example](GUI-Multi_gases.png)
 
 *The window after the multi-gas example (Help → Load Multi-gas Example) has
 been fitted: a spectrum simulated with 500 ppm N₂O, 20000 ppm H₂O and 30 ppm
@@ -194,7 +194,7 @@ error, and, for simulated spectra only, the reference value and the
 deviation from it. **Details…** opens the fields below in a separate window,
 which stays open and follows each new fit.
 
-![The single-gas example](GUI.png)
+![The single-gas example](GUI-Single_gas.png)
 
 *The single-gas example (Help → Load Example: 500 ppm N₂O, 2215.5–2220 cm⁻¹),
 retrieved as 499.997 ± 0.22 ppm. The fitted parameters below are behind the
