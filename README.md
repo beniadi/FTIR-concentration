@@ -8,6 +8,16 @@ the concentration comes out of the fit.
 It comes with a desktop GUI (`Concentration_GUI.py`), a headless self-test,
 and a script that simulates spectra with a known concentration for testing.
 
+## How to cite
+
+This software was developed inspired by:
+
+> Trisna, B. A., et al.: Measurement report: Radiative efficiencies of
+> (CF₃)₂CFCN, CF₃OCFCF₂, and CF₃OCF₂CF₃, *Atmos. Chem. Phys.*, 23, 4489, 2023,
+> <https://acp.copernicus.org/articles/23/4489/2023/>
+
+**If you use this code for a publication, you must cite this paper.**
+
 ---
 
 ## Why fit instead of integrating the absorbance?
