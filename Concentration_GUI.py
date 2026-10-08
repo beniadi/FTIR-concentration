@@ -1655,14 +1655,25 @@ class ConcentrationWindow(QMainWindow):
 
     # -- help ----------------------------------------------------------------
     def show_about(self):
-        QMessageBox.about(self, "About", (
+        mb = QMessageBox(self)
+        mb.setWindowTitle("About")
+        mb.setTextFormat(Qt.RichText)
+        mb.setTextInteractionFlags(Qt.TextBrowserInteraction)     # the paper link opens in the browser
+        mb.setText((
             "<b>%s</b><br><br>"
             "Gas mixing ratio from an FTIR transmittance spectrum by fitting a HITRAN "
             "line-by-line model convolved with the instrument line shape.<br><br>"
+            "Developed inspired by:<br>"
+            "Trisna, B. A., et al.: Measurement report: Radiative efficiencies of "
+            "(CF<sub>3</sub>)<sub>2</sub>CFCN, CF<sub>3</sub>OCFCF<sub>2</sub>, and "
+            "CF<sub>3</sub>OCF<sub>2</sub>CF<sub>3</sub>, Atmos. Chem. Phys., 23, 4489, 2023, "
+            "<a href=\"https://acp.copernicus.org/articles/23/4489/2023/\">"
+            "https://acp.copernicus.org/articles/23/4489/2023/</a><br><br>"
+            "<b>If you use this code for a publication, you must cite this paper.</b><br><br>"
             "Modules: retrieval · concentration · hitran_fetch · ils · spectrum_io.<br>"
             "Line data and partition sums: HITRAN / HAPI.<br>"
-            "Theme follows Voigt_GUI.py (gui_common)."
         ) % APP_TITLE)
+        mb.exec_()
 
     def show_method(self):
         QMessageBox.information(self, "Method && Caveats", (
