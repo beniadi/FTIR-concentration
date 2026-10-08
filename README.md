@@ -35,9 +35,10 @@ N_total    = P / (k_B · T)
 | Lorentz scale | factor on the HITRAN pressure-broadened widths | optional (default off) |
 | `baseline` | polynomial in wavenumber (order 0–6) | always |
 
-As a consistency check, every strong line group is then refitted in its own
-window, with shift, broadening and zero held fixed. Weak and saturated lines
-should give the same concentration.
+As a consistency check, every strong line group is then refitted on its own
+(a *segment*), with shift, broadening and zero held fixed. Weak and saturated
+lines should give the same concentration. In a multi-gas fit every gas gets
+its own segments.
 
 ---
 
@@ -76,17 +77,21 @@ python Concentration_GUI.py --selftest         # no window: retrieves the exampl
 Expected self-test output:
 
 ```
-example: true 500 ppm   retrieved 499.997 ± 0.22 ppm (-0.001 %)   rms 0.001   10 windows   0.7 s
+example: true 500 ppm   retrieved 499.997 ± 0.22 ppm (-0.001 %)   rms 0.001   10 segments   0.7 s
+multi-gas example: N2O 500.559 ± 1.6 ppm (+0.112 %)   H2O 20009.8 ± 1.4e+02 ppm (+0.049 %)   CO 30.0985 ± 0.054 ppm (+0.328 %)   rms 0.00101   zero auto: fixed at 0 (peak tau 0.413)   22 segments   5.6 s
 ```
 
 ---
 
 ## Using the GUI
 
-![FTIR Concentration window after fitting the worked example](GUI.png)
+![FTIR Concentration window after fitting the multi-gas example](GUI-Multi_gass.png)
 
-*The window after the worked example has been fitted: a spectrum simulated at
-500 ppm N₂O, retrieved as 499.997 ± 0.22 ppm.*
+*The window after the multi-gas example (Help → Load Multi-gas Example) has
+been fitted: a spectrum simulated with 500 ppm N₂O, 20000 ppm H₂O and 30 ppm
+CO, retrieved as 500.56 ± 1.6, 20010 ± 140 and 30.10 ± 0.054 ppm. Every gas has
+its own row in the Result tab, with the deviation from the simulated
+reference on the right.*
 
 ### The parts of the window
 
@@ -95,9 +100,9 @@ example: true 500 ppm   retrieved 499.997 ± 0.22 ppm (-0.001 %)   rms 0.001   1
 | Menu | What it holds |
 |---|---|
 | **File** | Open Spectrum (Ctrl+O), Save Result (Ctrl+S), Export Curves, Save Plot, Exit |
-| **HITRAN** | Open Line List (Ctrl+L), Download Lines from HITRANonline, Add Other Gas from File, Download Other Gas, Clear Other Gases |
+| **HITRAN** | Select Gases (Ctrl+G), Open Line List (Ctrl+L), Download Lines from HITRANonline, Add Other Gas from File, Download Other Gas, Clear Other Gases |
 | **ILS** | Load ILS File (Ctrl+I), Synthetic ILS (Gaussian or ideal sinc) |
-| **Retrieval** | Retrieve Concentration (Ctrl+R), Retrieval Settings (which parameters are fitted, partition function, …) |
+| **Retrieval** | Retrieve Concentration (Ctrl+R), Consistency Check (Ctrl+K), Retrieval Settings (which parameters are fitted, partition function, …) |
 | **Help** | Load Example, Load Multi-gas Example, About, Method & Caveats |
 
 **Spectrum** box (left)
@@ -107,7 +112,7 @@ example: true 500 ppm   retrieved 499.997 ± 0.22 ppm (-0.001 %)   rms 0.001   1
 | Toolbar | Standard matplotlib tools: home (reset view), back/forward, pan, zoom, subplot spacing, axis editor, save. The cursor position (x = wavenumber, y = transmittance) is shown on the right. |
 | Upper plot | **Measured** spectrum (blue), fitted **Model** (orange, with its ppm in the legend), and the analysis **Region** (light-blue background). In a good fit the orange line covers the blue line completely, as in the screenshot. |
 | Lower plot (**Residual**) | Measured − model. It should look like random noise around zero. Shapes in it (wiggles at the line positions, a slope) point to a wrong ILS, shift, pressure or baseline. |
-| Check boxes | Show or hide **Data**, **Model**, **Baseline** (the fitted baseline as a dashed line), **Windows** (dotted lines at the edges of the per-line windows), **Each gas** (in a multi-gas fit, each gas's own modelled transmittance, with its ppm in the legend) and the **Residual** panel. |
+| Check boxes | Show or hide **Data**, **Model**, **Baseline** (the fitted baseline as a dashed line), **Segments** (dotted lines at the edges of the consistency-check segments), **Each gas** (in a multi-gas fit, each gas's own modelled transmittance, with its ppm in the legend) and the **Residual** panel. |
 
 **Action row** (below the plot)
 
@@ -124,10 +129,20 @@ example: true 500 ppm   retrieved 499.997 ± 0.22 ppm (-0.001 %)   rms 0.001   1
 | Part | Function |
 |---|---|
 | **Spectrum** · Open… | The measured spectrum: file name, number of points, wavenumber range. |
-| **Target gas** · Open… / Download… | The HITRAN lines of the gas to retrieve: its name, file name, number of lines, range. *Download…* fetches a new list from HITRANonline. |
-| **Other gases** · Add… / Download… / Clear | Gases whose lines overlap the target's (H2O, CO, CO2 …), one line list each. With any listed, the fit is multi-gas: every gas gets its own concentration. *none* means a single-gas fit. |
+| **Gases** · Select… | The gases in the fit, by chemical formula: `N2O · single-gas fit`, or `N2O  +  H2O, CO` for a multi-gas fit (target first). The line-list files are in the tooltip. *Select…* opens the gas dialog (below). |
 | **ILS** · Open… | The instrument line shape and its FWHM (here 0.02646 cm⁻¹). |
 | **Data is** | How to read the y values: Transmittance, Absorbance log₁₀(1/T) or Absorbance ln(1/T). It is guessed when a file is opened. |
+
+**Select Gases** dialog (*Gases → Select…*, or *HITRAN → Select Gases*, Ctrl+G)
+
+Every gas with a line list in `Input/HITRAN/` is listed once, by formula.
+**Target** (one) is the gas the result is reported for; tick **Fit** for the
+other gases whose lines overlap it - each then gets its own concentration.
+Each gas's file is picked automatically: the one covering most of the
+region. Gases with no lines in the region are greyed out. *Add from File…*
+takes a list from elsewhere; *Download…* fetches one from HITRANonline. The
+dialog reads the formula and range from the file name (`H2O_2156.00-2168.00.data`,
+as downloads are saved), so other file names only appear through *Add from File…*.
 
 **Gas cell** box
 
@@ -144,25 +159,48 @@ in from its header automatically.
 
 | Tab | Shows |
 |---|---|
-| **Result** | The concentration and the fitted parameters (explained below). |
-| **Windows** | Each strong line group refitted on its own: wavenumber range, ppm ± u, peak τ, RMS, and a plot of all windows against the global result. |
+| **Result** | The concentration of every gas in the fit; **Details…** opens the fitted parameters (explained below). |
 | **ILS** | Plot of the loaded ILS with its FWHM, peak position, centroid, asymmetry and area. |
 | **Log** | Time-stamped record of everything loaded, fitted and saved. |
 
 The **status bar** at the very bottom repeats the last result.
 
+**Consistency Check** (*Retrieval → Consistency Check…*, Ctrl+K)
+
+Each strong line group refitted on its own (a segment), with shift,
+broadening and zero fixed at the global fit: a table (gas, wavenumber range,
+ppm ± u, peak τ, RMS, co-fitted gases) and a plot of the segments against the
+global result. In a multi-gas fit every gas gets segments around its own
+strong lines; another gas absorbing at least 20 % as much in a segment is
+refitted with it (*Co-fitted*), weaker ones stay at the global fit. Segments
+where the gas's lines are weak, or where another gas absorbs over 5× more,
+are left out. The multi-gas plot shows each segment as its deviation (%) from
+its gas's global result. The dialog stays open and follows each new fit.
+
 ### Reading the fit result
 
-Values from the screenshot (the 500 ppm example, true values in brackets):
+The **Concentration** box shows one row per gas: formula, ppm ± one standard
+error, and, for simulated spectra only, the reference value and the
+deviation from it. **Details…** opens the fields below in a separate window,
+which stays open and follows each new fit.
+
+![The single-gas example](GUI.png)
+
+*The single-gas example (500 ppm N₂O, 2215.5–2220 cm⁻¹). This screenshot is
+from an earlier layout: the details are now behind the Details… button, the
+Line list row is now Gases · Select…, and the Windows tab is now Retrieval →
+Consistency Check.*
+
+Values from this example (true values in brackets):
 
 | Field | Example value | Meaning and what to look for |
 |---|---|---|
-| **Concentration** | 499.997 ± 0.22 ppm [500] | The mixing ratio x of the gas in ppm (µmol/mol). The ± is one standard error from the fit residuals only. It does **not** include the uncertainty of T, P, L, HITRAN or the ILS (see *Caveats*). |
+| **Concentration** (main window) | 499.997 ± 0.22 ppm [500] | The mixing ratio x of each gas in ppm (µmol/mol). The ± is one standard error from the fit residuals only. It does **not** include the uncertainty of T, P, L, HITRAN or the ILS (see *Caveats*). |
 | **Number density** | 1.1525e+15 molecule/cm³ | x · N_total, with N_total = P / (k_B·T) = 2.305e+18 molecule/cm³ here. |
 | **Column** | 3.6523e+17 molecule/cm² | Number density × path length: the number of molecules the beam crosses per cm². |
 | **Reference** | 500 ppm → −0.001 % | Only for simulated files: the true ppm from the file header and how far the retrieval is from it. Shows "—" for measured spectra. |
 | **Other gases** | none (single-gas fit) | Multi-gas fit only: each other gas's ppm ± u, its deviation from a simulated reference, and its correlation r with the target. \|r\| near 1 means the region cannot separate the two gases. |
-| **Window spread** | 499.61 ± 0.66 ppm (10 windows, 0.13 %) | Mean ± standard deviation of the per-window results. Saturated and weak lines should agree. A spread much larger than the ± of the concentration means the model does not describe the lines consistently, usually because of a wrong T, P, ILS or zero level. |
+| **Consistency** | 499.61 ± 0.66 ppm (10 segments, spread 0.13 %) | Mean ± standard deviation of the segment results (per gas in a multi-gas fit). Saturated and weak lines should agree. A spread much larger than the ± of the concentration means the model does not describe the lines consistently, usually because of a wrong T, P, ILS or zero level. |
 | **Shift** | 4.95e-07 ± 3.6e-06 cm⁻¹ [0] | Wavenumber offset of the spectrum relative to HITRAN. Real spectra are often off by a few 0.01 cm⁻¹. |
 | **Extra broadening** | 0.00044 ± 0.00026 cm⁻¹ [0] | Gaussian HWHM added to the ILS. Close to zero means the loaded ILS fits the data. A large value means the real ILS is wider than the loaded one. |
 | **Zero offset** | −0.00025 ± 0.00021 [0] · auto: fitted (peak tau 10.8) | Offset z of the transmittance zero level (detector non-linearity, stray light). Mainly matters when lines are saturated. With the default *Auto* setting it is fitted only when the peak τ exceeds 1. |
@@ -175,34 +213,51 @@ Values from the screenshot (the 500 ppm example, true values in brackets):
 
 **Checklist for a trustworthy result:** the residual looks like noise, RMS
 ≈ the spectrum noise, Warnings says "none", shift and extra broadening are
-small, and the window spread is small compared with the concentration.
+small, and the segment spread is small compared with the concentration.
 
 ### Step by step
 
 1. **Spectrum.** Use *File → Open Spectrum* or *Inputs → Open…*. It reads
    two-column text (wavenumber, value; comments with `#`, `%`, `;` are
    skipped) or Bruker OPUS binary files. Check *Data is*.
-2. **Line list.** Use *HITRAN → Open Line List* for a 160-character
-   HITRAN `.par`/`.data` file, or a CSV with `nu, sw, elower` columns. Or use
-   *HITRAN → Download Lines* to fetch one molecule over a wavenumber range
-   from HITRANonline into `Input/HITRAN/`. Take the range ~1 cm⁻¹ wider than
-   the region, so lines just outside it still contribute their wings.
-3. **ILS.** Use *ILS → Load ILS File* for a two-column file (offset from line
-   centre in cm⁻¹, value), e.g. `ILS_LINEFIT.txt`. Or use a synthetic
-   Gaussian (FWHM) or ideal sinc (maximum OPD).
-4. **Gas cell.** Enter the temperature, pressure and path length of the measurement.
-5. **Region.** Type the wavenumber limits, or zoom the plot and press *Use view*.
-6. **Retrieve Concentration** (Ctrl+R), then read the result as above.
+2. **Region.** Zoom the plot onto a few clean lines of your gas and press
+   *Use view*, or type the limits. A few cm⁻¹ is enough; avoid saturated
+   bands of other gases if you can.
+3. **Gases.** *Gases → Select…*: pick the **Target** gas and tick **Fit** for
+   any other gas with lines in the region (H2O is the usual one). If a gas is
+   not listed, press *Download…* (HITRANonline, needs internet) and take the
+   range ~1 cm⁻¹ wider than the region, so lines just outside it still
+   contribute their wings. A HITRAN `.par`/`.data` file or a CSV with
+   `nu, sw, elower` columns can be added with *Add from File…*.
+4. **ILS.**
+   * *With an ILS file* (e.g. from LINEFIT): *ILS → Load ILS File*, two
+     columns: offset from line centre (cm⁻¹), value - like `ILS_LINEFIT.txt`.
+   * *Without one*: *ILS → Synthetic ILS*. **Ideal sinc** with the
+     instrument's maximum OPD, for spectra without apodization (boxcar);
+     with Bruker's resolution convention, OPD ≈ 0.9 / resolution (0.1 cm⁻¹ →
+     9 cm). **Gaussian** with a FWHM a little *narrower* than the narrowest
+     lines in your spectrum, for apodized spectra or when the OPD is unknown.
+     The fit adds its own Gaussian broadening (*Extra broadening*), but it can
+     only widen the ILS, never narrow it - so start narrow.
+5. **Gas cell.** Enter the temperature, pressure and path length of the
+   measurement. These enter the answer directly: 1 % in P or L is 1 % in ppm.
+6. **Retrieve Concentration** (Ctrl+R). Read every gas's ppm in the Result
+   tab, then check the fit (*Checklist* above), *Details…* and
+   *Retrieval → Consistency Check*.
 
-**Several gases.** If other gases absorb in the region, add their line lists
-with *Other gases → Add…* (or *Download…*) before step 6. The big number is
-still the target gas; the others are listed under *Other gases* in the
-Result tab and drawn with *Each gas*. *Help → Load Multi-gas Example* loads
+Without an ILS file, look at the *Extra broadening* in Details: a value near
+the bound (0.05 cm⁻¹) or wiggles in the residual at every line mean the
+synthetic ILS is too wide or the wrong shape - try a narrower Gaussian. The
+± does not include the ILS error, so the consistency check matters more here.
+
+**Several gases.** If other gases absorb in the region, tick them in
+*Gases → Select…* (step 3). The Result tab lists every gas, and *Each gas* draws
+each one's own transmittance. *Help → Load Multi-gas Example* loads
 the N2O + H2O + CO simulation from `multigas_example.py` and fits it.
 
 ### Saving
 
-* *File → Save Result*: text file with all inputs, fitted parameters and the window table.
+* *File → Save Result*: text file with all inputs, fitted parameters and the consistency-check table.
 * *File → Export Curves*: columns of wavenumber, data, model, baseline, residual (plus each gas's own model in a multi-gas fit).
 * *File → Save Plot*: PNG, SVG or PDF at 300 dpi.
 
@@ -223,7 +278,7 @@ Output goes to `Results/` by default. Settings are kept in
 | Skip lines weaker than | 1e-5 × strongest | Speed. |
 | Fine-grid oversampling | 8 | Model points per data point before the ILS convolution. |
 | Centre the ILS at | its maximum | Or centroid, or the tabulated zero. |
-| Per-window refit | automatic | Or off. Single-gas fits only. |
+| Segment refit | automatic | The consistency check, or off. |
 
 ---
 
@@ -283,6 +338,10 @@ It also returns each gas's own transmittance (`r["components"]`). It refits
 once with each gas self-broadened at its fitted mixing ratio, which matters
 for H2O at the per-cent level.
 
+In the GUI, tick the other gases in *Gases → Select…*; the fit is then
+multi-gas automatically. *Help → Load Multi-gas Example* loads this case and
+gives the result in the screenshot at the top of *Using the GUI*.
+
 `multigas_example.py` downloads N2O, H2O and CO lines, simulates a mixture
 (500 ppm N2O, 2 % H2O, 30 ppm CO) in 2160.0–2163.5 cm⁻¹ and retrieves it. In
 that window the H2O line at 2161.73 cm⁻¹ sits between two N2O lines and next to
@@ -316,7 +375,7 @@ also the GUI's default.
 |---|---|
 | `Concentration_GUI.py` | The window: inputs, plots, result tabs, saving. Also `--selftest`. |
 | `gui_common.py` | Shared by all GUIs in this folder (this one and future ones): stylesheet, colours, plot canvas, table styling, background worker thread, Config/Results folders and JSON settings helpers. Each GUI keeps its own settings in its own file. |
-| `retrieval.py` | The forward model and the fits (`fit_spectrum`, multi-gas `fit_multigas`), automatic line windows. |
+| `retrieval.py` | The forward model and the fits (`fit_spectrum`, multi-gas `fit_multigas`), automatic line segments for the consistency check. |
 | `concentration.py` | HITRAN line-list reader, line intensity at T, partition-function ratio, number density, integrated-area concentration with uncertainty budget. |
 | `hitran_fetch.py` | HAPI wrapper: download lines, TIPS partition sums, isotopologue masses. |
 | `ils.py` | ILS kernel sampling and centring, convolution, synthetic and LINEFIT ILS, ILS statistics. |
@@ -347,11 +406,11 @@ print(r["ppm"], r["ppm_err"], [w["ppm"] for w in r["windows"]])
 * **The ± is the fit noise only.** It does not include the uncertainty of
   temperature, pressure, path length, HITRAN intensities or the ILS. The
   concentration scales as 1/(N_total·L), so a 1 % error in P or L is a 1 %
-  error in ppm. The spread of the per-window results is a better guide to
-  model error.
+  error in ppm. The spread of the segment results (consistency check) is a
+  better guide to model error.
 * **Saturated lines** (peak τ ≫ 1) make the result sensitive to the ILS
   shape and the zero level. Keep the zero offset free, and compare the weak-
-  and strong-line windows.
+  and strong-line segments.
 * **Parameters on a bound** (listed under Warnings) mean the fit traded them
   against something else. Widen the bound or fix the parameter.
 * HITRAN intensities include natural isotopic abundance. With all

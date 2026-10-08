@@ -492,7 +492,74 @@ def fit_multigas(x, T_meas, gases, T, P_pa, L_cm, ils, options=None):
                        and not (n == "broadening" and v == 0.0)]
     m = (mf.xf >= lo) & (mf.xf <= hi)
     out["tau_max"] = {n: float(mf.tau(p[:K], p[K], p[K + 3], only=k)[m].max()) for k, n in enumerate(names)}
+    if o["windows"]:
+        out["windows"] = _multi_windows(mf, gases, x, Tm, p, o, T, lo, hi)
     out["elapsed_s"] = time.perf_counter() - t0
+    return out
+
+
+# a gas is refitted in a window when its peak optical depth there is at least
+# this fraction of the window's own gas; weaker ones stay at the global fit
+COFIT_REL = 0.2
+# a window is kept for a gas only when the gas's peak optical depth in it is at
+# least this fraction of its peak in the region (its weak lines say little)
+WINDOW_MIN_REL = 0.1
+
+
+def _multi_windows(mf, gases, x, Tm, p, o, T, lo, hi):
+    """The per-window check of a multi-gas fit.  Windows are put around the
+    strong line groups of every gas ("auto", from its own line list), and each
+    window belongs to that gas.  In a window the gas's concentration and a
+    linear baseline are refitted, with shift, broadening, zero and Lorentz
+    scale fixed at the global fit; other gases that absorb there too (peak tau
+    >= COFIT_REL of the window's gas) are refitted with it, the rest are fixed.
+    A window is dropped when its gas's lines there are weak (peak tau below
+    WINDOW_MIN_REL of the gas's peak in the region) or when another gas absorbs
+    more than 1 / COFIT_REL times as much - it then says little about the gas.
+    An explicit list of (lo, hi) windows is given to the gas absorbing most."""
+    names = mf.names
+    K = len(names)
+    shift, w, z, g = p[K], p[K + 1], p[K + 2], p[K + 3]
+    ker = mf.kernel(w)
+    if isinstance(o["windows"], str) and o["windows"] == "auto":
+        wins = [(n, a, b) for n, lines in gases
+                for a, b in auto_windows(lines, lo, hi, T, shift=shift, q_mode=o["q_mode"], iso=o["iso"])]
+    else:
+        wins = [(None, a, b) for a, b in o["windows"]]
+    taus = [mf.tau(p[:K], shift, g, only=k) for k in range(K)]
+    mr = (mf.xf >= lo) & (mf.xf <= hi)
+    gas_peak = np.array([t[mr].max() for t in taus])
+    out = []
+    for owner, wlo, whi in sorted(wins, key=lambda t: t[1]):
+        mw = (x >= wlo) & (x <= whi)
+        mm = (mf.xf >= wlo) & (mf.xf <= whi)
+        if mw.sum() < 6 or not mm.any():
+            continue
+        peak = np.array([t[mm].max() for t in taus])
+        ko = int(np.argmax(peak)) if owner is None else names.index(owner)
+        if peak[ko] <= 0 or peak[ko] < WINDOW_MIN_REL * gas_peak[ko] or peak[ko] < COFIT_REL * peak.max():
+            continue
+        free = [k for k in range(K) if k == ko or peak[k] >= COFIT_REL * peak[ko]]
+        nf = len(free)
+        xw, Tw = x[mw], Tm[mw]
+        xnw = _xn(xw, wlo, whi)
+
+        def vm_of(v):
+            vm = p[:K].copy(); vm[free] = v[:nf]
+            return vm
+
+        def mod_w(v):
+            return (v[nf] + v[nf + 1] * xnw) * mf.transmittance(vm_of(v), shift, w, z, xq=xw, ker=ker, g=g)
+
+        rw = least_squares(lambda v: mod_w(v) - Tw, list(p[free]) + [float(np.percentile(Tw, 95)), 0.0],
+                           bounds=([0.0] * nf + [0, -2], [1e7] * nf + [2, 2]), x_scale="jac")
+        _c, ew = _cov_err(rw, nf + 2)
+        i = free.index(ko)
+        out.append({"gas": names[ko], "lo": float(wlo), "hi": float(whi),
+                    "ppm": float(rw.x[i]), "ppm_err": float(ew[i]),
+                    "rms": float(np.sqrt(np.mean(rw.fun ** 2))),
+                    "tau_max": float(mf.tau(vm_of(rw.x), shift, g)[mm].max()),
+                    "cofit": [names[k] for k in free if k != ko]})
     return out
 
 
