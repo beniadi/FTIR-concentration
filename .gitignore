@@ -1,7 +1,3 @@
-# generated at run time
-Config/
-Results/
-
 # Python
 __pycache__/
 *.py[cod]
